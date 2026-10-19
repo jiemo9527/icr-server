@@ -1,0 +1,8 @@
+# 已在 Windows Python 3.12 下测试；模型首次加载后可离线运行。
+fastapi>=0.133,<1
+uvicorn>=0.34,<1
+numpy>=2,<3
+opencv-python-headless>=4.10,<6
+requests>=2.32,<3
+ddddocr==1.6.1
+rapidocr-onnxruntime==1.4.4

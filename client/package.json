@@ -1,0 +1,1 @@
+{"name":"icr-client-tests","private":true,"scripts":{"test":"node --test icr-helper.*.test.js"},"devDependencies":{"jsdom":"30.1.1"}}

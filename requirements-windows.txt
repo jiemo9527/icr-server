@@ -1,0 +1,6 @@
+# Windows build-only dependencies. Runtime model packages pinned to tested versions.
+-r requirements-icr.txt
+pystray==0.19.5
+Pillow==12.2.0
+pyinstaller==6.21.0
+httpx==0.28.1

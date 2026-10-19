@@ -1,0 +1,17 @@
+services:
+  icr-server:
+    image: ghcr.io/jiemo9527/icr-server:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8899:8899"
+    environment:
+      ICR_HOST: "0.0.0.0"
+      ICR_PORT: "8899"
+      ICR_TOKEN: "${ICR_TOKEN:-}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
