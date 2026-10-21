@@ -206,11 +206,17 @@
         return true;
     }
 
+    // 选择器里的标签名：用 localName。uni-app H5 会把 <uni-image>/<uni-view> 的 tagName 改写成 IMAGE/VIEW，
+    // 用 tagName 拼出的 image > img 在页面上匹配不到任何元素
+    function tagSel(el) {
+        return CSS.escape(el.localName || el.tagName.toLowerCase());
+    }
+
     function cssPath(el) {
         if (!(el instanceof Element)) return '';
         const path = [];
         while (el && el.nodeType === 1 && path.length < 10) {
-            let sel = el.nodeName.toLowerCase();
+            let sel = tagSel(el);
             if (el.id) {
                 sel += '#' + CSS.escape(el.id);
                 path.unshift(sel);
@@ -218,7 +224,7 @@
             }
             const parent = el.parentNode;
             if (parent) {
-                const siblings = Array.from(parent.children).filter(c => c.nodeName === el.nodeName);
+                const siblings = Array.from(parent.children).filter(c => c.localName === el.localName);
                 if (siblings.length > 1) sel += ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')';
             }
             path.unshift(sel);
@@ -252,7 +258,7 @@
         for (const attr of attrNames) {
             const v = el.getAttribute && el.getAttribute(attr);
             if (v && v.length <= 60 && !UNSTABLE_TOKEN.test(v)) {
-                const sel = el.tagName.toLowerCase() + '[' + attr + '="' + v.replace(/"/g, '\\"') + '"]';
+                const sel = tagSel(el) + '[' + attr + '="' + v.replace(/"/g, '\\"') + '"]';
                 if (selectorResolves(sel, el)) return sel;
             }
         }
@@ -262,7 +268,7 @@
             const parts = cls.split(/\s+/).filter(p => p.length < 40 && !UNSTABLE_TOKEN.test(p) &&
                 !/(^|[-_])(hover|active|focus|focused|selected|current|checked|disabled|loading|show|hide|hidden|visible|open|in|enter|leave|done|fail|success|error)$/i.test(p));
             for (let n = 1; n <= Math.min(parts.length, 3); n++) {
-                const sel = el.tagName.toLowerCase() + '.' + parts.slice(0, n).map(CSS.escape).join('.');
+                const sel = tagSel(el) + '.' + parts.slice(0, n).map(CSS.escape).join('.');
                 if (selectorResolves(sel, el)) return sel;
             }
         }
@@ -272,7 +278,7 @@
             const pcls = (typeof parent.className === 'string' ? parent.className : '').trim().split(/\s+/)
                 .filter(p => p && p.length < 40 && !UNSTABLE_TOKEN.test(p));
             for (const pc of pcls.slice(0, 3)) {
-                const sel = parent.tagName.toLowerCase() + '.' + CSS.escape(pc) + ' > ' + el.tagName.toLowerCase();
+                const sel = tagSel(parent) + '.' + CSS.escape(pc) + ' > ' + tagSel(el);
                 if (selectorResolves(sel, el)) return sel;
             }
         }
@@ -282,7 +288,7 @@
                 const u = new URL(el.src, location.href);
                 const name = u.pathname.split('/').pop();
                 if (name && !UNSTABLE_TOKEN.test(name)) {
-                    const sel = el.tagName.toLowerCase() + '[src*="' + name.replace(/"/g, '') + '"]';
+                    const sel = tagSel(el) + '[src*="' + name.replace(/"/g, '') + '"]';
                     if (selectorResolves(sel, el)) return sel;
                 }
             } catch (e) { /* ignore */ }
@@ -1343,13 +1349,21 @@
             !!el.parentElement && el.parentElement !== document.body && visible(el.parentElement));
     }
 
+    // 大图是否显示中：元素本身可见，或它实际显示的图片来源可见。
+    // uni-app 的 <uni-image> 里 img 是 opacity:0，图片由同层背景 div 显示，选中 img 时不能当成已关闭
+    function imageShown(imgEl) {
+        if (!imgEl || !imgEl.isConnected) return false;
+        if (visible(imgEl)) return true;
+        const src = findImageSource(imgEl);
+        const area = src && visibleRect(src);
+        return !!(src && visible(src) && area && rectArea(area) > 100);
+    }
+
     // 评估一条规则在当前页面是否适用：图不在 → null；配套元素不在 → missing
     function evalRule(rule) {
         const imgEl = queryVisibleImage(rule.img);
-        if (!imgEl) return null;
+        if (!imgEl || !imageShown(imgEl)) return null;
         const src = findImageSource(imgEl);
-        const area = src && visibleRect(src);
-        if (!visible(imgEl) && !(src && visible(src) && area && rectArea(area) > 100)) return null;
         const cand = {
             type: rule.type,
             el: imgEl,
@@ -1563,7 +1577,7 @@
             const fresh = getCandidates().find(c => c.el === cand.el && c.type === cand.type &&
                 c.input === cand.input && c.handle === cand.handle && c.hint === cand.hint &&
                 JSON.stringify(c.rule || null) === ruleSnapshot);
-            if (!cand.el.isConnected || !visible(cand.el) || !fresh || challengeStamp(cand) !== stamp) {
+            if (!imageShown(cand.el) || !fresh || challengeStamp(cand) !== stamp) {
                 const error = new Error('验证码已换图或关闭，已丢弃旧结果，未执行操作');
                 error.staleChallenge = true;
                 throw error;
@@ -1759,6 +1773,15 @@
             'font-size:12px', 'cursor:pointer', 'vertical-align:middle',
             'font-family:system-ui,-apple-system,sans-serif', 'white-space:nowrap',
         ].join(';'));
+        // 父元素是纵向 flex / grid（如 uni-app 的 .uni-input-wrapper）时，按钮会被排到输入框下方并撑满整行：
+        // 父元素已定位就叠在输入框右侧，否则至少不拉伸
+        const ps = getComputedStyle(input.parentNode);
+        const stacked = (/flex/.test(ps.display) && /column/.test(ps.flexDirection)) || /grid/.test(ps.display);
+        if (stacked && ps.position !== 'static') {
+            Object.assign(btn.style, { position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)', margin: '0', zIndex: '1' });
+        } else if (stacked) {
+            Object.assign(btn.style, { alignSelf: 'flex-start', flex: 'none' });
+        }
         btn.addEventListener('click', () => {
             const fresh = getCandidates().find(c => (c.type === 'text' || c.type === 'math') && c.input === input);
             if (fresh) recognizeCandidate(fresh);

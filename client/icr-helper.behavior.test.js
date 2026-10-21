@@ -51,6 +51,13 @@ test('父级 opacity=0 的配套元素不能令隐藏规则变成可用',async()
  const list=h.w.__test.getCandidates();assert.equal(list.length,1);assert.equal(list[0].type,'slider');
 });
 
+test('输入框父元素是纵向 flex（uni-app 输入框）：按钮叠在输入框右侧，不撑满整行',async()=>{
+ const h=await harness('<img id="code" src="data:image/png;base64,AAAA"><div id="wrap" style="display:flex;flex-direction:column;position:relative"><input id="answer"></div>',[rule]);
+ h.scan();const btn=h.doc.querySelector('[data-icrh-btn]');
+ assert.equal(btn.parentElement.id,'wrap');assert.equal(btn.style.position,'absolute');assert.match(btn.style.right,/px/);
+ const normal=await harness(text,[rule]);normal.scan();assert.equal(normal.doc.querySelector('[data-icrh-btn]').style.position,'');
+});
+
 test('识别响应到达前换图时不填旧答案，按钮恢复待识别',async()=>{
  const h=await harness(text,[rule]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);
  h.doc.getElementById('code').src='data:image/png;base64,BBBB';h.reply({ok:true,text:'old'});await sleep(40);

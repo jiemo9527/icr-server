@@ -81,6 +81,18 @@ test('数字字母：本地 OCR 识别出结果就直接填入，不调用大模
   assert.ok(t.toasts().some(s => /本地 OCR 识别完成：已填入 ab12/.test(s)), t.toasts().join('|'));
 });
 
+test('uni-app 图片：规则选中的 img 是透明的（显示靠同层背景 div），识别时不能误判为「已换图或关闭」', async () => {
+  const t = await setup({
+    html: '<uni-image class="yzm" data-w="82" data-h="38"><div style="background-image:url(data:image/png;base64,QUFBQQ==)" data-w="82" data-h="38"></div>' +
+      '<img src="data:image/png;base64,QUFBQQ==" style="opacity:0" data-w="82" data-h="38"></uni-image><input id="vc" type="text">',
+    rules: [{ id: 'u1', type: 'text', enabled: true, img: 'uni-image.yzm > img', input: '#vc' }],
+    net: { '/ocr': () => ({ ok: true, text: '8rzt' }) },
+  });
+  await t.run();
+  assert.equal(t.doc.getElementById('vc').value, '8rzt', t.toasts().join('|'));
+  assert.ok(!t.toasts().some(s => /已换图或关闭/.test(s)), t.toasts().join('|'));
+});
+
 test('计算题：本地返回安全计算结果时直接填入，不调用大模型', async () => {
   const t = await setup({
     html: TEXT_HTML, rules: TEXT_RULE,

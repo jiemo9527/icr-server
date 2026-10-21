@@ -178,6 +178,34 @@ test('文本验证码：右键图片再右键输入框', async () => {
     { img: '#code', input: '#vc' });
 });
 
+test('uni-app H5 自定义元素（tagName 被改写成 IMAGE/VIEW）：按真实标签名生成选择器，规则能保存', async () => {
+  const dom = makePage(
+    '<uni-view class="form"><uni-view class="row"><uni-input class="input"><input class="uni-input-input"></uni-input></uni-view>' +
+    '<uni-view class="row"><uni-input class="input"><input class="uni-input-input"></uni-input>' +
+    '<uni-image class="yanzhenuang" data-w="82" data-h="38"><div style="background-image:url(data:image/png;base64,AAAA)" data-w="82" data-h="38"></div>' +
+    '<img id="x" src="data:image/png;base64,AAAA" data-w="82" data-h="38"></uni-image></uni-view></uni-view>');
+  const win = dom.window, doc = win.document;
+  // uni-app 运行时把 uni-image / uni-view 的 tagName、nodeName 改成小程序标签名
+  for (const el of doc.querySelectorAll('uni-view, uni-image, uni-input')) {
+    const name = el.localName.replace(/^uni-/, '').toUpperCase();
+    Object.defineProperty(el, 'tagName', { value: name });
+    Object.defineProperty(el, 'nodeName', { value: name });
+  }
+  doc.getElementById('x').removeAttribute('id');
+  const store = {}, menus = [];
+  await install(win, store, menus);
+  chooseType(win, menus, 'text');
+  await sleep(10);
+  const inputs = doc.querySelectorAll('input');
+  rightClick(win, doc.querySelector('.yanzhenuang img'));
+  rightClick(win, inputs[1]);
+  const rule = store.icrh_site_rules_v2 && store.icrh_site_rules_v2['www.rainyun.com'][0];
+  assert.ok(rule, '规则已保存');
+  assert.equal(doc.querySelector(rule.img), doc.querySelector('.yanzhenuang img'));
+  assert.equal(doc.querySelector(rule.input), inputs[1]);
+  assert.doesNotMatch(rule.img + ' ' + rule.input, /(^|[\s>])(image|view|input\.input)\b/);
+});
+
 test('验证码在 iframe 里：顶层下发拾取，iframe 内右键保存到 iframe 域名，并通知顶层结束', async () => {
   const dom = makePage('<iframe id="f"></iframe>');
   const top = dom.window;
