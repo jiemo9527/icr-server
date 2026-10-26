@@ -823,3 +823,21 @@ test('设置面板可修改点选间隔，非法值不保存', async () => {
   assert.equal(store.icrh_config_v1.clickDelayMin, 800);
   assert.equal(store.icrh_config_v1.clickDelayMax, 1200);
 });
+
+test('验证码是 DOM 文字（每个字一个 span，如江苏医保单位网厅）：右键选中文字容器，不选到外层的整页背景', async () => {
+  const dom = makePage('<div id="page" style="background-image:url(data:image/png;base64,TUFTSw==)" data-w="1200" data-h="560">' +
+    '<form><input id="vc" placeholder="请输入验证码"><div class="ValidCode code-num" data-w="71" data-h="30">' +
+    '<span data-w="15" data-h="20" style="transform:rotate(13deg)">D</span><span data-w="15" data-h="20">D</span><span data-w="15" data-h="20">t</span><span data-w="15" data-h="20">k</span></div></form></div>');
+  const win = dom.window, doc = win.document;
+  const store = {}, menus = [];
+  await install(win, store, menus);
+  const span = doc.querySelector('.ValidCode span');
+  doc.elementsFromPoint = () => [span, doc.querySelector('.ValidCode'), doc.querySelector('form'), doc.getElementById('page'), doc.body];
+  chooseType(win, menus, 'text');
+  await sleep(10);
+  rightClick(win, span);
+  rightClick(win, doc.getElementById('vc'));
+  const rule = store.icrh_site_rules_v2 && store.icrh_site_rules_v2['www.rainyun.com'][0];
+  assert.ok(rule, '规则已保存');
+  assert.equal(doc.querySelector(rule.img), doc.querySelector('.ValidCode'));
+});

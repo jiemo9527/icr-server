@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ICR 验证码助手
 // @namespace    https://github.com/jiemo9527/icr-server
-// @version      2.0.0
+// @version      2.0.1
 // @description  按规则识别网页验证码：数字字母、计算题、滑块、图标点选、文字点选。识别由本机 icr-server 完成，可选多模态大模型备选；只填写/点击/拖动，不自动提交。使用大模型时验证码图片会发往你配置的 API。
 // @author       jiemo9527
 // @license      MIT
@@ -403,6 +403,7 @@
             if (url.startsWith('data:')) return url;
             return await gmFetchDataURL(url);
         }
+        if (isTextCaptcha(el)) return renderTextCaptcha(el);
         throw new Error('无法从该元素获取图片');
     }
 
@@ -465,6 +466,105 @@
     }
     const canvasBlank = el => canvasState(el) === 'blank';
 
+    /* ------------------------------------------------------
+     * DOM 文字验证码：没有图片，每个字符是一个带颜色/旋转的 span（如 <div class="ValidCode"><span>D</span>…）。
+     * 把屏幕上可见的字符按样式画到 canvas 上，当作图片交给 OCR / 大模型。
+     * 要求：至少 2 段可见文字、合计 3~8 个字母数字或算式符号、元素不大、内部没有表单控件和图片，
+     * 避免把普通文字（标签、按钮）当成验证码。隐藏、透明、移出框外的干扰字不画。
+     * ------------------------------------------------------ */
+    const TEXT_CAPTCHA_CHARS = /^[A-Za-z0-9+\-*/×÷=?？]+$/;
+    function hiddenWithin(el, root) {
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+            const st = getComputedStyle(n);
+            if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return true;
+            if (/^(transparent|rgba\(.*,\s*0\))$/.test((st.color || '').trim())) return true;
+            if (n === root) break;
+        }
+        return false;
+    }
+    function textNodeRect(node) {
+        try {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const r = range.getBoundingClientRect();
+            if (r && r.width >= 1 && r.height >= 1) return r;
+        } catch (e) { /* jsdom 等不支持 Range 布局 */ }
+        return node.parentElement.getBoundingClientRect();
+    }
+    function textCaptchaParts(el) {
+        if (!el || el.nodeType !== 1 || !el.firstElementChild) return null;
+        const raw = (el.textContent || '').replace(/\s+/g, '');
+        if (raw.length < 3 || raw.length > 16) return null;
+        if (el.querySelector('input, textarea, select, button, img, canvas, svg, a')) return null;
+        const box = el.getBoundingClientRect();
+        if (box.width < 12 || box.height < 8 || box.width > 400 || box.height > 150) return null;
+        const parts = [];
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+            const text = n.textContent.replace(/\s+/g, '');
+            if (!text || !n.parentElement || hiddenWithin(n.parentElement, el)) continue;
+            const r = textNodeRect(n);
+            if (!(r.width >= 1 && r.height >= 1)) continue;
+            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            if (cx < box.left || cx > box.left + box.width || cy < box.top || cy > box.top + box.height) continue;
+            parts.push({ text, el: n.parentElement, cx, cy });
+        }
+        const all = parts.map(p => p.text).join('');
+        if (parts.length < 2 || all.length < 3 || all.length > 8 || !TEXT_CAPTCHA_CHARS.test(all)) return null;
+        return { box, parts };
+    }
+    const isTextCaptcha = el => !!textCaptchaParts(el);
+
+    // 只取旋转/缩放/倾斜部分（字符按中心点定位，位移已体现在位置里）
+    function linearTransform(value) {
+        if (!value || value === 'none') return null;
+        const m = /^matrix\(([^)]+)\)$/.exec(value.trim());
+        if (m) {
+            const v = m[1].split(',').map(Number);
+            return v.length === 6 && v.every(Number.isFinite) ? v.slice(0, 4) : null;
+        }
+        try {
+            const d = new DOMMatrix(value);
+            return [d.a, d.b, d.c, d.d];
+        } catch (e) { return null; }
+    }
+
+    function pageBackgroundColor(el) {
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+            const c = (getComputedStyle(n).backgroundColor || '').trim();
+            if (c && !/^(transparent|rgba\(.*,\s*0\))$/.test(c)) return c;
+        }
+        return '#fff';
+    }
+
+    function renderTextCaptcha(el, scale = 2) {
+        const info = textCaptchaParts(el);
+        if (!info) throw new Error('验证码文字不可见');
+        const { box, parts } = info;
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(box.width * scale));
+        c.height = Math.max(1, Math.round(box.height * scale));
+        const ctx = c.getContext('2d');
+        if (!ctx) throw new Error('canvas 不可用，无法读取文字验证码');
+        ctx.fillStyle = pageBackgroundColor(el);
+        ctx.fillRect(0, 0, c.width, c.height);
+        for (const p of parts) {
+            const st = getComputedStyle(p.el);
+            ctx.save();
+            ctx.scale(scale, scale);
+            ctx.translate(p.cx - box.left, p.cy - box.top);
+            const m = p.el !== el && linearTransform(st.transform);
+            if (m) ctx.transform(m[0], m[1], m[2], m[3], 0, 0);
+            ctx.font = [st.fontStyle, st.fontWeight, st.fontSize, st.fontFamily].filter(Boolean).join(' ');
+            ctx.fillStyle = st.color || '#000';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(p.text, 0, 0);
+            ctx.restore();
+        }
+        return c.toDataURL('image/png');
+    }
+
     function isImageSource(el) {
         if (!el || el.nodeType !== 1) return false;
         if (el.tagName === 'IMG') return !!el.src;
@@ -490,6 +590,8 @@
             const area = rectArea(vr && intersectRect(vr, region));
             if (area > bestArea) { best = c; bestArea = area; }
         }
+        // 没有图片、字符是一个个 span 的文字验证码：元素本身就是来源（imageToDataURL 会把文字画成图片）
+        if (!best && isTextCaptcha(el)) return el;
         // 选中的是盖在图上的空 canvas / 遮罩，或读不出内容的跨域 canvas：在同一父容器里找与它位置重合的图片
         const unreadable = best && best.tagName === 'CANVAS' && canvasState(best) === 'tainted';
         if ((!best || unreadable) && el.parentElement) {
@@ -550,6 +652,8 @@
             rect: { left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top },
             source: src,
         });
+        // 文字验证码已按元素自身区域画成图片，不再按背景图裁剪
+        if (!/^(IMG|CANVAS|INPUT)$/.test(src.tagName) && !bgUrlOf(src)) return toResult(fullUrl, rectOf(src));
         // img / canvas 完整可见（没被裁剪）时直接用原图，不用解码重画
         if (src.tagName === 'IMG' || src.tagName === 'CANVAS' || src.tagName === 'INPUT') {
             const full = rectOf(src);
@@ -2527,7 +2631,8 @@
         if (!stack.length && e.target && e.target.nodeType === 1) stack = [e.target];
         stack = stack.filter(el => !isOwnUi(el));
         if (kind === 'image') {
-            const hit = stack.find(isImageLike);
+            // 从最上层往下找：文字验证码（每个字一个 span）在外层整页背景图之前命中
+            const hit = stack.find(el => isImageLike(el) || isTextCaptcha(el));
             if (hit) return hit;
             // 图片设了 pointer-events:none 时命中的是外层容器：找容器里覆盖该点的图片
             for (const el of stack) {

@@ -540,3 +540,28 @@ test('设置面板能保存全局和按类型引擎选项', async () => {
   assert.equal(t.store.icrh_config_v1.backendByType.slider,'auto');
   assert.equal(t.store.icrh_config_v1.backendByType.click,'inherit');
 });
+
+test('DOM 文字验证码：把可见字符按样式画成图片发给本地 OCR，隐藏的干扰字不画', async () => {
+  const t = await setup({
+    html: '<input id="vc" type="text"><div class="ValidCode" data-w="71" data-h="30">' +
+      '<span data-w="15" data-h="20" style="color:rgb(135, 233, 92);font-size:22px;transform:rotate(13deg)">D</span>' +
+      '<span data-w="15" data-h="20" style="opacity:0">X</span><span data-w="15" data-h="20" style="display:none">Y</span>' +
+      '<span data-w="15" data-h="20" style="color:rgb(49, 233, 85)">D</span><span data-w="15" data-h="20">t</span><span data-w="15" data-h="20">k</span></div>',
+    rules: [{ id: 'v', type: 'text', enabled: true, img: 'div.ValidCode', input: '#vc' }],
+    cfg: { backend: 'local' },
+    net: { '/ocr': () => ({ ok: true, text: 'DDtk' }) },
+  });
+  const drawn = [];
+  t.win.HTMLCanvasElement.prototype.getContext = function () {
+    return { save() {}, restore() {}, scale() {}, translate() {}, transform() {}, fillRect() {},
+      fillText: (s) => drawn.push(s), set fillStyle(v) {}, set font(v) {}, set textAlign(v) {}, set textBaseline(v) {} };
+  };
+  t.win.HTMLCanvasElement.prototype.toDataURL = function () { return 'data:image/png;base64,UkVOREVS'; };
+  await t.run();
+  const ocr = t.localCalls('/ocr');
+  assert.equal(ocr.length, 1, t.toasts().join('|'));
+  assert.equal(ocr[0].body.image, 'data:image/png;base64,UkVOREVS');
+  assert.deepEqual(drawn, ['D', 'D', 't', 'k']);
+  assert.equal(t.doc.getElementById('vc').value, 'DDtk');
+  assert.equal(t.llmCalls().length, 0);
+});
