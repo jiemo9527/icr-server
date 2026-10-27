@@ -18,7 +18,7 @@ async function harness(html,rules,cfg={}){
 const text='<img id="code" src="data:image/png;base64,AAAA"><input id="answer">';
 const rule={id:'r1',type:'text',img:'#code',input:'#answer'};
 test('按钮点击立即变色、运行中防重复，结束显示成功或失败',async()=>{
- const h=await harness(text,[rule]);h.scan();const btn=h.doc.querySelector('[data-icrh-btn]');const color=btn.style.background;
+ const h=await harness(text,[rule]);h.scan();const btn=h.doc.querySelector('#icrh-fab [data-icrh-target]');const color=btn.style.background;
  btn.click();await sleep(30);assert.equal(btn.dataset.state,'running');assert.notEqual(btn.style.background,color);btn.click();assert.equal(h.calls.length,1);
  h.reply({ok:true,text:'ab12'});await sleep(30);assert.equal(btn.dataset.state,'success');assert.equal(h.doc.getElementById('answer').value,'ab12');
  btn.click();await sleep(30);h.reply({ok:false,msg:'uncertain'});await sleep(30);assert.equal(btn.dataset.state,'error');
@@ -51,25 +51,38 @@ test('父级 opacity=0 的配套元素不能令隐藏规则变成可用',async()
  const list=h.w.__test.getCandidates();assert.equal(list.length,1);assert.equal(list[0].type,'slider');
 });
 
-test('输入框父元素是纵向 flex（uni-app 输入框）：按钮叠在输入框右侧，不撑满整行',async()=>{
- const h=await harness('<img id="code" src="data:image/png;base64,AAAA"><div id="wrap" style="display:flex;flex-direction:column;position:relative"><input id="answer"></div>',[rule]);
- h.scan();const btn=h.doc.querySelector('[data-icrh-btn]');
- assert.equal(btn.parentElement.id,'wrap');assert.equal(btn.style.position,'absolute');assert.match(btn.style.right,/px/);
- const normal=await harness(text,[rule]);normal.scan();assert.equal(normal.doc.querySelector('[data-icrh-btn]').style.position,'');
+test('文本和计算题统一使用可移动悬浮面板，不向输入框容器插入按钮',async()=>{
+ for(const type of ['text','math']){
+  const h=await harness('<img id="code" src="data:image/png;base64,AAAA"><div id="wrap" style="display:flex;flex-direction:column;position:relative"><input id="answer"></div>',[{...rule,type}]);
+  h.scan();const panel=h.doc.getElementById('icrh-fab');assert.ok(panel,'应显示悬浮面板');
+  assert.equal(panel.style.position,'fixed');assert.equal(h.doc.getElementById('wrap').children.length,1);
+  assert.equal(h.doc.querySelectorAll('[data-icrh-btn]').length,0);
+  const btn=panel.querySelector('[data-icrh-target]');assert.ok(btn);
+  const start={left:parseFloat(panel.style.left),top:parseFloat(panel.style.top)};
+  panel.getBoundingClientRect=()=>({left:parseFloat(panel.style.left),top:parseFloat(panel.style.top),width:150,height:32,right:parseFloat(panel.style.left)+150,bottom:parseFloat(panel.style.top)+32});
+  const pointer=(name,x,y)=>panel.dispatchEvent(new h.w.MouseEvent(name,{bubbles:true,button:0,clientX:x,clientY:y}));
+  pointer('pointerdown',10,10);pointer('pointermove',70,50);pointer('pointerup',70,50);
+  assert.equal(parseFloat(panel.style.left),start.left+60);assert.equal(parseFloat(panel.style.top),start.top+40);
+  btn.click();await sleep(20);assert.equal(h.calls.length,0,'拖动后紧跟的点击不识别');
+  h.scan();assert.equal(parseFloat(panel.style.left),start.left+60,'扫描不重置拖动位置');
+  assert.equal(h.store.icrh_fab_pos_v1['fixture.test'].left,start.left+60);
+  btn.click();await sleep(30);assert.equal(h.calls.length,1,'正常点击仍可识别');
+  h.reply({ok:true,text:'8'});await sleep(30);assert.equal(h.doc.getElementById('answer').value,'8');
+ }
 });
 
 test('识别响应到达前换图时不填旧答案，按钮恢复待识别',async()=>{
- const h=await harness(text,[rule]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);
+ const h=await harness(text,[rule]);h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(30);
  h.doc.getElementById('code').src='data:image/png;base64,BBBB';h.reply({ok:true,text:'old'});await sleep(40);
- assert.equal(h.doc.getElementById('answer').value,'');assert.equal(h.doc.querySelector('[data-icrh-btn]').dataset.state,'idle');
+ assert.equal(h.doc.getElementById('answer').value,'');assert.equal(h.doc.querySelector('#icrh-fab [data-icrh-target]').dataset.state,'idle');
 });
 test('识别期间原目标移除时不填写旧输入框',async()=>{
- const h=await harness(text,[rule]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);
+ const h=await harness(text,[rule]);h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(30);
  h.doc.getElementById('code').remove();h.reply({ok:true,text:'old'});await sleep(40);assert.equal(h.doc.getElementById('answer').value,'');
 });
 test('运行中换图再点也不并发；完成后新图可重新识别',async()=>{
- const h=await harness(text,[rule]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);
- h.doc.getElementById('code').src='data:image/png;base64,BBBB';h.scan();const btn=h.doc.querySelector('[data-icrh-btn]');
+ const h=await harness(text,[rule]);h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(30);
+ h.doc.getElementById('code').src='data:image/png;base64,BBBB';h.scan();const btn=h.doc.querySelector('#icrh-fab [data-icrh-target]');
  assert.equal(btn.disabled,true);btn.click();await sleep(30);assert.equal(h.calls.length,1);
  h.reply({ok:true,text:'old'});await sleep(40);btn.click();await sleep(30);assert.equal(h.calls.length,2);h.reply({ok:true,text:'new'});await sleep(30);assert.equal(h.doc.getElementById('answer').value,'new');
 });
@@ -79,15 +92,15 @@ test('按规则自动执行开关覆盖全局开关',async()=>{
  const on=await harness(text,[{...rule,autoExecute:true}],{autoExecute:false});on.scan();await sleep(40);assert.equal(on.calls.length,1);
 });
 test('手动执行同一张图后开启自动执行不会重复请求',async()=>{
- const h=await harness(text,[rule]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);h.reply({ok:true,text:'ab12'});await sleep(30);
+ const h=await harness(text,[rule]);h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(30);h.reply({ok:true,text:'ab12'});await sleep(30);
  h.store.icrh_config_v1.autoExecute=true;h.scan();await sleep(50);assert.equal(h.calls.length,1);
 });
 test('每次扫描同步其他框架保存的配置',async()=>{
  const h=await harness(text,[rule]);h.store.icrh_config_v1={...h.store.icrh_config_v1,autoExecute:true};h.scan();await sleep(40);assert.equal(h.calls.length,1);
 });
 test('规则后端优先于按类型和全局后端',async()=>{
- const h=await harness(text,[{...rule,backend:'llm'}],{backendByType:{text:'local'}});h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(40);
- assert.equal(h.calls.length,0);assert.equal(h.doc.querySelector('[data-icrh-btn]').dataset.state,'error');
+ const h=await harness(text,[{...rule,backend:'llm'}],{backendByType:{text:'local'}});h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(40);
+ assert.equal(h.calls.length,0);assert.equal(h.doc.querySelector('#icrh-fab [data-icrh-target]').dataset.state,'error');
 });
 
 test('规则管理器的后端和自动执行选择器独立保存',async()=>{
@@ -110,7 +123,7 @@ test('拖动中关闭验证时释放鼠标并停止后续移动',async()=>{
 
 test('弹窗隐藏或规则停用后迟到响应不能填写',async()=>{
  for(const action of ['hide','disable']){
-  const h=await harness(text,[{...rule}]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);
+  const h=await harness(text,[{...rule}]);h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(30);
   if(action==='hide')h.doc.getElementById('code').style.display='none';else h.store.icrh_site_rules_v2['fixture.test'][0].enabled=false;
   h.reply({ok:true,text:'old'});await sleep(40);assert.equal(h.doc.getElementById('answer').value,'');
  }
@@ -124,7 +137,7 @@ test('全部点选坐标先校验，包含越界或非数值时一个也不点�
 });
 
 test('本地失败返回前换图时不得继续发送大模型请求',async()=>{
- const h=await harness(text,[{...rule,backend:'auto'}],{apiKey:'test',llmFallback:true});h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(30);
+ const h=await harness(text,[{...rule,backend:'auto'}],{apiKey:'test',llmFallback:true});h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(30);
  h.doc.getElementById('code').src='data:image/png;base64,BBBB';h.reply({ok:false,msg:'uncertain'});await sleep(50);assert.equal(h.calls.length,1);assert.equal(h.doc.getElementById('answer').value,'');
 });
 
@@ -261,9 +274,11 @@ test('悬停选择按钮时高亮对应目标，移开恢复',async()=>{
 test('脚本头不沿用原始名称/作者/更新地址；弹出消息无前缀',async()=>{
  const head=source.slice(0,source.indexOf('// ==/UserScript=='));
  assert.match(head,/@name\s+ICR 验证码助手/);
- for(const bad of [/AI Captcha Solver/,/ai-captcha-solver/,/多模态大模型版/,/greasyfork/i,/@downloadURL/,/@updateURL/])assert.doesNotMatch(head,bad);
+ for(const bad of [/AI Captcha Solver/,/ai-captcha-solver/,/多模态大模型版/,/@downloadURL/,/@updateURL/])assert.doesNotMatch(head,bad);
+ const homepage=head.match(/^\/\/ @homepageURL\s+(.+)$/m);
+ assert.equal(homepage?.[1], 'https://greasyfork.org/zh-CN/scripts/601152-icr-%E9%AA%8C%E8%AF%81%E7%A0%81%E5%8A%A9%E6%89%8B');
  assert.doesNotMatch(source,/\[AI验证码\]/);
- const h=await harness(text,[rule]);h.scan();h.doc.querySelector('[data-icrh-btn]').click();await sleep(20);h.reply({ok:true,text:'ab12'});await sleep(40);
+ const h=await harness(text,[rule]);h.scan();h.doc.querySelector('#icrh-fab [data-icrh-target]').click();await sleep(20);h.reply({ok:true,text:'ab12'});await sleep(40);
  const msgs=[...h.doc.querySelectorAll('#icrh-toast-box div')].map(d=>d.textContent);
  assert.ok(msgs.length,'有提示');for(const m of msgs)assert.doesNotMatch(m,/^\[/,m);
 });

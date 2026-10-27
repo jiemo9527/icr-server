@@ -50,13 +50,29 @@ try:
         page.add_init_script(shim+'\n'+(ROOT/'client/icr-helper.user.js').read_text(encoding='utf-8'))
         page.route('http://client.fixture/',lambda route:route.fulfill(content_type='text/html',body=f'<h1>Client smoke fixture</h1><img id="code" src="{data}"><input id="answer">'))
         page.goto('http://client.fixture/')
-        button=page.locator('[data-icrh-btn]');button.wait_for()
+        button=page.locator('#icrh-fab [data-icrh-target]');button.wait_for()
+        panel=page.locator('#icrh-fab')
+        assert panel.evaluate("e=>getComputedStyle(e).position")=='fixed'
+        assert page.locator('[data-icrh-btn]').count()==0
+        before=panel.bounding_box()
+        page.mouse.move(before['x']+2,before['y']+2);page.mouse.down()
+        page.mouse.move(before['x']+202,before['y']+152,steps=10);page.mouse.up()
+        page.wait_for_timeout(50)
+        moved=panel.bounding_box()
+        assert abs(moved['x']-before['x']-200)<2 and abs(moved['y']-before['y']-150)<2
+        assert page.evaluate('window.__requests')==0
+        saved_position=page.evaluate("window.__store.icrh_fab_pos_v1['client.fixture']")
+        assert saved_position=={'left':round(moved['x']),'top':round(moved['y'])}
+        panel.evaluate('e=>e.remove()')
+        panel.wait_for();restored=panel.bounding_box()
+        assert abs(restored['x']-moved['x'])<2 and abs(restored['y']-moved['y'])<2
+        results['floating_drag_saved_and_restored']=True
         button.click();page.wait_for_function("document.querySelector('#answer').value==='ab12'",timeout=60000)
         results['real_ocr_fill']=True
         page.evaluate("document.querySelector('#answer').value='';window.__replyDelay=700")
-        button.click();page.wait_for_function("document.querySelector('[data-icrh-btn]').dataset.state==='running'")
+        button.click();page.wait_for_function("document.querySelector('#icrh-fab [data-icrh-target]').dataset.state==='running'")
         page.evaluate("document.querySelector('#code').src += '#changed'")
-        page.wait_for_function("document.querySelector('[data-icrh-btn]').dataset.state==='idle'",timeout=10000)
+        page.wait_for_function("document.querySelector('#icrh-fab [data-icrh-target]').dataset.state==='idle'",timeout=10000)
         assert page.locator('#answer').input_value()==''
         results['stale_reply_discarded']=True
         page.evaluate("window.__menus.find(m=>m.name.includes('规则管理')).fn()")

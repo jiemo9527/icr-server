@@ -36,7 +36,7 @@ SAVE_DIR = os.getenv("ICR_SAVE_DIR", "").strip()
 # 两个图标的识别结果靠得这么近，说明匹配到了同一处，提交只会白白增加风控分
 MIN_POINT_DISTANCE = 30
 
-app = FastAPI(title="icr-server 本地验证码识别", version="2.0.1")
+app = FastAPI(title="icr-server 本地验证码识别", version="2.0.3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 

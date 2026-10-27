@@ -28,6 +28,7 @@
 - 规则大图选中空白或跨域 canvas 时，`findImageSource` 会改用同位置的图片。
 - 点击前会模拟鼠标移动轨迹（`movePointer`）。等待时间用墙钟截止时间（`sleepUntil`），不要每步 `sleep` 累加：Windows 计时器精度约 15.6ms，误差会累积。
 - 滑块拖动同时派发 mouse 和 touch 事件；本地滑块按拼图块的实际位置闭环修正（易盾的拼图块不跟把手 1:1 移动）。
+- 文本验证码、计算题、滑块和点选的操作按钮统一放在可拖动悬浮面板，不向输入框内部或旁边插入按钮；按站点记住拖动位置，自动定位时避让验证码图片和输入框。
 - 设置和规则窗口在 Shadow DOM 里，宿主元素必须 `isolateKeyboard`，否则网页的单键快捷键会抢走焦点。
 - 存储键：`icrh_config_v1`、`icrh_site_rules_v2`；测试钩子只在 `window.__icrhTestHooks` 存在时注册。
 

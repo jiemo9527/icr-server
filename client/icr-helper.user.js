@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         ICR 验证码助手
 // @namespace    https://github.com/jiemo9527/icr-server
-// @version      2.0.1
+// @version      2.0.3
 // @description  按规则识别网页验证码：数字字母、计算题、滑块、图标点选、文字点选。识别由本机 icr-server 完成，可选多模态大模型备选；只填写/点击/拖动，不自动提交。使用大模型时验证码图片会发往你配置的 API。
 // @author       jiemo9527
 // @license      MIT
-// @homepageURL  https://github.com/jiemo9527/icr-server
+// @homepageURL  https://greasyfork.org/zh-CN/scripts/601152-icr-%E9%AA%8C%E8%AF%81%E7%A0%81%E5%8A%A9%E6%89%8B
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -369,6 +369,8 @@
         if (!el) throw new Error('验证码元素不存在');
         const tag = el.tagName.toLowerCase();
 
+        if (tag === 'svg') return renderSvg(el);
+
         if (tag === 'canvas') {
             try {
                 return el.toDataURL('image/png');
@@ -565,8 +567,44 @@
         return c.toDataURL('image/png');
     }
 
+    // 内联 SVG（路径或文字）先固化尺寸与页面样式，再栅格化；不把 SVG XML 发给识别服务。
+    async function renderSvg(el) {
+        const copy = el.cloneNode(true), rect = el.getBoundingClientRect();
+        const vb = el.viewBox && el.viewBox.baseVal;
+        const width = Math.max(1, Math.round(vb && vb.width || rect.width));
+        const height = Math.max(1, Math.round(vb && vb.height || rect.height));
+        const originals = [el, ...el.querySelectorAll('*')];
+        const clones = [copy, ...copy.querySelectorAll('*')];
+        const properties = ['color', 'fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width',
+            'stroke-opacity', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'opacity',
+            'display', 'visibility', 'font-family', 'font-size', 'font-weight', 'font-style', 'text-anchor'];
+        originals.forEach((node, i) => {
+            const st = getComputedStyle(node);
+            for (const key of properties) {
+                const value = st.getPropertyValue(key);
+                if (value) clones[i].style.setProperty(key, value);
+            }
+        });
+        copy.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        copy.setAttribute('width', width);
+        copy.setAttribute('height', height);
+        copy.style.width = width + 'px';
+        copy.style.height = height + 'px';
+        const xml = new XMLSerializer().serializeToString(copy);
+        const img = await loadImage('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml));
+        const c = document.createElement('canvas');
+        c.width = width; c.height = height;
+        const ctx = c.getContext('2d');
+        if (!ctx) throw new Error('canvas 不可用，无法读取 SVG 验证码');
+        ctx.fillStyle = pageBackgroundColor(el);
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        return c.toDataURL('image/png');
+    }
+
     function isImageSource(el) {
         if (!el || el.nodeType !== 1) return false;
+        if (el.localName === 'svg') return !!el.querySelector('path, text, image, use, rect, circle, ellipse, polygon, polyline, line');
         if (el.tagName === 'IMG') return !!el.src;
         if (el.tagName === 'CANVAS') return el.width > 0 && el.height > 0 && !canvasBlank(el);
         if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'image') return !!el.src;
@@ -583,7 +621,7 @@
         if (!el) return null;
         const region = visibleRect(el) || rectOf(el);
         let best = null, bestArea = 0;
-        const list = [el].concat(Array.from(el.querySelectorAll('img, canvas, input[type="image"], [style*="background"], div, span, i')));
+        const list = [el].concat(Array.from(el.querySelectorAll('img, canvas, svg, input[type="image"], [style*="background"], div, span, i')));
         for (const c of list) {
             if (!isImageSource(c) || !shownOnScreen(c)) continue;
             const vr = visibleRect(c);
@@ -596,7 +634,7 @@
         const unreadable = best && best.tagName === 'CANVAS' && canvasState(best) === 'tainted';
         if ((!best || unreadable) && el.parentElement) {
             const minArea = 0.6 * rectArea(region);
-            for (const c of el.parentElement.querySelectorAll('img, [style*="background"]')) {
+            for (const c of el.parentElement.querySelectorAll('img, svg, [style*="background"]')) {
                 if (c === el || !isImageSource(c) || !shownOnScreen(c)) continue;
                 const vr = visibleRect(c);
                 const area = rectArea(vr && intersectRect(vr, region));
@@ -1573,6 +1611,7 @@
         const hint = cand.hint && (findImageSource(cand.hint) || cand.hint);
         const fingerprint = el => {
             if(!el)return '';
+            if(el.localName==='svg')return new XMLSerializer().serializeToString(el);
             if(el.tagName==='CANVAS'){try{return el.toDataURL('image/png');}catch(e){return '';}}
             return el.src || bgUrlOf(el) || el.textContent;
         };
@@ -1842,57 +1881,11 @@
         try {
             refreshCfg();
             const list = getCandidates();
-            // 文本验证码：在输入框旁边保证有「识别」按钮
-            for (const cand of list) {
-                if ((cand.type === 'text' || cand.type === 'math') && cand.input && !cand.choice) ensureInlineButton(cand.input);
-            }
             updateFloatingButton(list);
             autoRunRules(list);
         } catch (e) {
             log('扫描出错', e);
         }
-    }
-
-    /* ======================================================
-     * 触发按钮：输入框旁的「🤖识别」+ 右下角悬浮按钮
-     * ====================================================== */
-    function ensureInlineButton(input) {
-        if (!input || !input.parentNode) return;
-        // 输入框后面已经挂了按钮就不再加
-        let btn = input.nextElementSibling;
-        while (btn) {
-            if (btn.getAttribute && btn.getAttribute('data-icrh-btn')) {
-                const cand=getCandidates().find(c=>c.input===input); if(cand) paintButton(btn,cand);
-                return;
-            }
-            btn = btn.nextElementSibling;
-        }
-        btn = document.createElement('button');
-        btn.type = 'button';
-        btn.setAttribute('data-icrh-btn', '1');
-        btn.textContent = '🤖识别';
-        btn.setAttribute('style', [
-            'display:inline-block', 'margin-left:4px', 'padding:3px 10px',
-            'background:#5e35b1', 'color:#fff', 'border:none', 'border-radius:4px',
-            'font-size:12px', 'cursor:pointer', 'vertical-align:middle',
-            'font-family:system-ui,-apple-system,sans-serif', 'white-space:nowrap',
-        ].join(';'));
-        // 父元素是纵向 flex / grid（如 uni-app 的 .uni-input-wrapper）时，按钮会被排到输入框下方并撑满整行：
-        // 父元素已定位就叠在输入框右侧，否则至少不拉伸
-        const ps = getComputedStyle(input.parentNode);
-        const stacked = (/flex/.test(ps.display) && /column/.test(ps.flexDirection)) || /grid/.test(ps.display);
-        if (stacked && ps.position !== 'static') {
-            Object.assign(btn.style, { position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)', margin: '0', zIndex: '1' });
-        } else if (stacked) {
-            Object.assign(btn.style, { alignSelf: 'flex-start', flex: 'none' });
-        }
-        btn.addEventListener('click', () => {
-            const fresh = getCandidates().find(c => (c.type === 'text' || c.type === 'math') && c.input === input);
-            if (fresh) recognizeCandidate(fresh);
-            else toast('未识别到元素：验证码图片或输入框已不在页面', 'warn');
-        });
-        input.insertAdjacentElement('afterend', btn);
-        const cand=getCandidates().find(c=>c.input===input); if(cand) paintButton(btn,cand);
     }
 
     /* ------------------------------------------------------
@@ -2066,9 +2059,9 @@
     function updateFloatingButton(list) {
         if (!Array.isArray(list)) list=getCandidates();
         let panel=document.getElementById('icrh-fab');
-        const need=list.filter(c=>c.choice||!['text','math'].includes(c.type)||!c.input);
+        const need=list;
         if (!need.length) { if(panel)panel.remove(); fabLayoutSig=''; return; }
-        fabAvoid=need.flatMap(c=>[c.el,c.hint,c.handle]).filter(Boolean);
+        fabAvoid=need.flatMap(c=>[c.el,c.input,c.hint,c.handle]).filter(Boolean);
         if (!panel) {
             panel=document.createElement('div');panel.id='icrh-fab';
             panel.style.cssText='position:fixed;left:0;top:0;z-index:2147483646;display:flex;flex-direction:column;gap:4px;padding:4px;background:#ede7f6;border-radius:10px;touch-action:none;cursor:grab;';
@@ -2611,7 +2604,7 @@
         // 铺满整个视口的一般是页面背景，不是验证码
         if (r.width * r.height >= 0.85 * window.innerWidth * window.innerHeight) return false;
         const tag = el.tagName;
-        if (tag === 'IMG' || tag === 'CANVAS') return true;
+        if (tag === 'IMG' || tag === 'CANVAS' || el.localName === 'svg') return true;
         if (tag === 'INPUT' && (el.type || '').toLowerCase() === 'image') return true;
         return /url\(/.test(getComputedStyle(el).backgroundImage || '');
     }
