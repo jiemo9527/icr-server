@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ICR 验证码助手
 // @namespace    https://github.com/jiemo9527/icr-server
-// @version      2.0.3
+// @version      2.0.4
 // @description  按规则识别网页验证码：数字字母、计算题、滑块、图标点选、文字点选。识别由本机 icr-server 完成，可选多模态大模型备选；只填写/点击/拖动，不自动提交。使用大模型时验证码图片会发往你配置的 API。
 // @author       jiemo9527
 // @license      MIT
@@ -234,7 +234,7 @@
     }
 
     // 选择器是否稳定：不含每次刷新都会变的东西（图片文件名、nth-of-type 路径、随机 id/类名）
-    const UNSTABLE_TOKEN = /\d{5,}|[a-f0-9]{12,}|^(css|sc|jsx|_)-[a-z0-9]{4,}$/i;
+    const UNSTABLE_TOKEN = /\d{5,}|[a-f0-9]{12,}|[_-][a-f0-9]{8,}$|^(css|sc|jsx|_)-[a-z0-9]{4,}$/i;
 
     // 选择器匹配的元素里有 el，且（全页唯一 或 el 是可见的那个）→ 识别时 queryVisible 能取回它
     function selectorResolves(sel, el) {
@@ -989,12 +989,62 @@
     }
     const pointsFrom = (r, labels) => r.points.map(([x, y], i) => ({ x_ratio: x / r.width, y_ratio: y / r.height, label: (labels || [])[i] || String(i + 1) }));
 
-    // 题目图片（天爱验证码「请依次点击:」后面写着汉字的图）：按可见区域、原图分辨率截取
+    // 独立图片组成的题目条：只合并同一小容器内互不重叠的可见图片，不把大图/刷新按钮带进去。
+    function hintImageGroup(el) {
+        if (!el) return null;
+        const root = el.tagName === 'IMG' ? el.parentElement : el;
+        if (!root || root === document.body) return null;
+        const box = visibleRect(root);
+        if (!box || box.right - box.left > 400 || box.bottom - box.top > 150) return null;
+        const images = [...root.querySelectorAll('img')].filter(img => {
+            // 只排除题目容器内部的独立控件；容器外层整体可点击（如刷新题目）不影响目标图。
+            for (let node = img; node && node !== root; node = node.parentElement) {
+                if (node.matches('button, a[href], input, [role="button"], [role="link"], [onclick]')) return false;
+            }
+            return visible(img) && intersectRect(visibleRect(img) || rectOf(img), box);
+        });
+        if (images.length < 2 || images.length > 8) return null;
+        const rects = images.map(img => intersectRect(visibleRect(img) || rectOf(img), box));
+        if (rects.some((r, i) => rects.slice(i + 1).some(other => intersectRect(r, other)))) return null;
+        return { root, images, rects };
+    }
+
+    async function captureHint(el, opts = {}) {
+        const group = hintImageGroup(el);
+        if (!group) {
+            const src = hintImageSource(el);
+            if (!src) return null;
+            const target = src.contains(el) ? src : (el.contains(src) ? el : src);
+            return captureVisible(target, opts);
+        }
+        const { images, rects } = group;
+        const decoded = await Promise.all(images.map(async img => loadImage(await imageToDataURL(img))));
+        const region = { left: Math.min(...rects.map(r => r.left)), top: Math.min(...rects.map(r => r.top)),
+            right: Math.max(...rects.map(r => r.right)), bottom: Math.max(...rects.map(r => r.bottom)) };
+        const scale = Math.max(1, ...decoded.map((img, i) => img.naturalWidth / images[i].getBoundingClientRect().width));
+        const c = document.createElement('canvas');
+        c.width = Math.ceil((region.right - region.left) * scale);
+        c.height = Math.ceil((region.bottom - region.top) * scale);
+        const ctx = c.getContext('2d');
+        if (!ctx) throw new Error('canvas 不可用，无法读取题目图标');
+        ctx.fillStyle = pageBackgroundColor(group.root);
+        ctx.fillRect(0, 0, c.width, c.height);
+        decoded.forEach((img, i) => {
+            const full = images[i].getBoundingClientRect(), r = rects[i];
+            const kx = img.naturalWidth / full.width, ky = img.naturalHeight / full.height;
+            ctx.drawImage(img, (r.left - full.left) * kx, (r.top - full.top) * ky,
+                (r.right - r.left) * kx, (r.bottom - r.top) * ky,
+                (r.left - region.left) * scale, (r.top - region.top) * scale,
+                (r.right - r.left) * scale, (r.bottom - r.top) * scale);
+        });
+        return { dataUrl: c.toDataURL('image/png'), rect: { left: region.left, top: region.top,
+            width: region.right - region.left, height: region.bottom - region.top }, source: group.root };
+    }
+
+    // 本地与大模型共用完整题目图（单张雪碧图仍按可见区域裁剪）。
     async function hintImageData(cand) {
-        const src = hintImageSource(cand.hint);
-        if (!src) return null;
-        const el = src.contains(cand.hint) ? src : (cand.hint.contains(src) ? cand.hint : src);
-        return (await captureVisible(el, { native: true })).dataUrl;
+        const shot = await captureHint(cand.hint, { native: true });
+        return shot ? shot.dataUrl : null;
     }
 
     // withImage：题目文字里没有目标字时，把题目图片一起发给服务端读字。
@@ -1067,13 +1117,14 @@
     async function localClick(cand) {
         const spSrc = hintImageSource(cand.hint);
         if (!findImageSource(cand.el) || !spSrc) throw new Error('未识别到元素：缺少大图或题目图标');
-        // 题目图也按可见区域裁剪：易盾的题目条和大图是同一张图，只露出 80x19 的一条
-        const hintEl = spSrc.contains(cand.hint) ? spSrc : (cand.hint.contains(spSrc) ? cand.hint : spSrc);
-        const [shot, sprite] = await Promise.all([localClickBg(cand), captureVisible(hintEl, { native: true })]);
+        // 多图题目合成为完整图标条；单图仍走可见区域裁剪。
+        const [shot, sprite] = await Promise.all([localClickBg(cand), captureHint(cand.hint, { native: true })]);
         const r = await localApi('/solve', { bg: shot.dataUrl, sprite: sprite.dataUrl });
         if (!r.ok || !Array.isArray(r.points) || !r.points.length) {
             throw new Error('未识别到图标（' + (r.msg || '无结果') + '）');
         }
+        const group = hintImageGroup(cand.hint);
+        if (group && r.points.length !== group.images.length) throw new Error('识别坐标数量与题目图标数量不符');
         return pointsFrom(r);
     }
 
@@ -1138,7 +1189,7 @@
         el = node || el;
         const hint = { text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100) };
         if (findImageSource(el)) {
-            try { hint.dataUrl = (await captureVisible(el)).dataUrl; } catch (e) { log('题目提示图片读取失败', e); }
+            try { hint.dataUrl = (await captureHint(el))?.dataUrl; } catch (e) { log('题目提示图片读取失败', e); }
         }
         return hint;
     }
@@ -1406,6 +1457,8 @@
         if (points.some(p => !p || ![p.x_ratio, p.y_ratio].every(v => Number.isFinite(v) && v >= 0 && v <= 1))) {
             throw new Error('点击坐标无效或超出图片范围，未执行点击');
         }
+        const group = hintImageGroup(cand.hint);
+        if (group && points.length !== group.images.length) throw new Error('识别坐标数量与题目图标数量不符，未执行点击');
         const imgRect = cand.area || cand.el.getBoundingClientRect();
         lastPointer = null;
         for (let i = 0; i < points.length; i++) {
@@ -1608,14 +1661,15 @@
     }
     function challengeStamp(cand) {
         const src = findImageSource(cand.el) || cand.el;
-        const hint = cand.hint && (findImageSource(cand.hint) || cand.hint);
+        const hintGroup = hintImageGroup(cand.hint);
+        const hint = !hintGroup && cand.hint && (findImageSource(cand.hint) || cand.hint);
         const fingerprint = el => {
             if(!el)return '';
             if(el.localName==='svg')return new XMLSerializer().serializeToString(el);
             if(el.tagName==='CANVAS'){try{return el.toDataURL('image/png');}catch(e){return '';}}
             return el.src || bgUrlOf(el) || el.textContent;
         };
-        return [fingerprint(src),fingerprint(hint)].join('|');
+        return [fingerprint(src), hintGroup ? hintGroup.images.map(fingerprint).join('\n') : fingerprint(hint)].join('|');
     }
     function paintButton(btn, cand) {
         const id = targetId(cand), state = targetStates.get(id);
@@ -2554,7 +2608,7 @@
             { kind: 'image', label: '可拖动的滑块图片（本地匹配用）', optional: true }],
         click: [
             { kind: 'image', label: '点选验证码大图' },
-            { kind: 'any', label: '题目提示（如「请依次点击」后面的字/图）', optional: true },
+            { kind: 'hint', label: '题目提示（如「请依次点击」后面的字/图）', optional: true },
         ],
     };
     const OWN_UI_IDS = ['icrh-pick-panel', 'icrh-pick-hl', 'icrh-toast-box', 'icrh-fab', 'icrh-settings-host', 'icrh-rules-host'];
@@ -2635,6 +2689,12 @@
                 if (vr && e.clientX >= vr.left && e.clientX <= vr.right && e.clientY >= vr.top && e.clientY <= vr.bottom) {
                     return isImageLike(src) ? src : el;
                 }
+            }
+        } else if (kind === 'hint') {
+            for (const el of stack) {
+                const group = hintImageGroup(el);
+                if (group) return group.root;
+                if (isImageLike(el)) break;
             }
         } else if (kind === 'input') {
             const hit = stack.find(isInputLike);
