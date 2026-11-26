@@ -117,7 +117,11 @@ def calculate(text):
     return str(value.numerator) if value.denominator == 1 else f'{float(value):.6f}'.rstrip('0').rstrip('.')
 
 
-def recognize_text(raw, charset='alnum', length=None, case='any', mode='auto'):
+PREFER_INDEX = {'old': 0, 'beta': 1}  # read_candidates 的前两项：ddddocr 旧模型、beta 模型
+
+
+def recognize_text(raw, charset='alnum', length=None, case='any', mode='auto', prefer='none'):
+    """prefer：两模型冲突时按用户指定的模型采用（只用于普通文本；该模型仍须高分并满足字符集/长度/大小写）。"""
     started = time.perf_counter()
     result: dict[str, Any] = {'ok': False, 'text': '', 'kind': 'text', 'engine': 'ddddocr-dual',
               'reason': '', 'msg': '', 'fallback_suggested': True}
@@ -163,9 +167,17 @@ def recognize_text(raw, charset='alnum', length=None, case='any', mode='auto'):
                 return fail('invalid_expression', '算式不完整或有歧义')
         else:
             keys.append(text)
+    preferred = None
     if len(set(keys)) != 1:
-        return fail('model_conflict', '模型结果冲突，建议大模型或人工确认')
-    if min(score for _, score in nonempty) < MIN_CONFIDENCE:
+        index = PREFER_INDEX.get(prefer)
+        if is_math or index is None or index >= len(candidates) or not candidates[index][0]:
+            seen = list(dict.fromkeys(text for text, _ in nonempty))
+            return fail('model_conflict', '模型结果冲突（' + ' / '.join(seen) + '），建议大模型或人工确认')
+        preferred = candidates[index]
+        keys = [preferred[0]]
+        if preferred[1] < MIN_CONFIDENCE:
+            return fail('low_confidence', '模型结果冲突，指定优先的模型分数较低，不自动采用')
+    elif min(score for _, score in nonempty) < MIN_CONFIDENCE:
         return fail('low_confidence', '模型分数较低，不自动采用')
     if is_math:
         try:
@@ -181,6 +193,11 @@ def recognize_text(raw, charset='alnum', length=None, case='any', mode='auto'):
             return fail('length_mismatch', f'长度不符：期望 {length}，识别出 {len(text)}')
         if (case == 'upper' and any(c.islower() for c in text)) or (case == 'lower' and any(c.isupper() for c in text)):
             return fail('case_mismatch', '大小写不符合规则')
+        result['text'] = text
+    if preferred is not None:
+        result.update(ok=True, reason='preferred_model', preferred=prefer, fallback_suggested=False,
+                      confidence=preferred[1], elapsed=round(time.perf_counter() - started, 3))
+        return result
     result.update(ok=True, reason='accepted', fallback_suggested=False,
                   confidence=min(score for _, score in nonempty), elapsed=round(time.perf_counter() - started, 3))
     return result

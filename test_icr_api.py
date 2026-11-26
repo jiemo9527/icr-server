@@ -27,6 +27,14 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertEqual(r['reason'], 'model_conflict')
 
+    def test_ocr_prefer_option(self):
+        with patch('local_recognition.read_candidates', return_value=[('ab12', .99), ('abl2', .99)]):
+            r = self.client.post('/ocr', json={'image': self.image, 'prefer': 'old'}).json()
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['text'], 'ab12')
+        bad = self.client.post('/ocr', json={'image': self.image, 'prefer': 'longest'})
+        self.assertEqual(bad.status_code, 422)
+
     def test_non_utf8_console_does_not_break_ocr_response(self):
         import io
         console=io.TextIOWrapper(io.BytesIO(),encoding='cp1252',errors='strict')

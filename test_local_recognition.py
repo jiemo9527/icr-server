@@ -18,6 +18,28 @@ class OcrTests(unittest.TestCase):
         r = self.predict([("ab12", .98), ("abl2", .99)])
         self.assertFalse(r["ok"])
         self.assertEqual(r["reason"], "model_conflict")
+        self.assertIn("ab12", r["msg"])
+        self.assertIn("abl2", r["msg"])
+
+    def test_conflict_prefers_named_model_when_requested(self):
+        # 候选顺序：0=ddddocr 旧模型，1=beta 模型
+        r = self.predict([("geHB", .95), ("qeHB", .97)], prefer="beta")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["text"], "qeHB")
+        self.assertEqual(r["reason"], "preferred_model")
+        self.assertEqual(r["preferred"], "beta")
+        r = self.predict([("geHB", .95), ("qeHB", .97)], prefer="old")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["text"], "geHB")
+
+    def test_preferred_model_still_needs_confidence_and_constraints(self):
+        self.assertFalse(self.predict([("geHB", .95), ("qeHB", .5)], prefer="beta")["ok"])
+        self.assertFalse(self.predict([("geHB", .95), ("qeHB", .99)], prefer="beta", length=5)["ok"])
+        self.assertFalse(self.predict([("geHB", .95), ("", 0.0)], prefer="beta")["ok"])
+
+    def test_prefer_does_not_apply_to_math(self):
+        r = self.predict([("1+2=?", .99), ("1+3=?", .99)], prefer="beta", mode="math")
+        self.assertFalse(r["ok"])
 
     def test_agreed_text_is_accepted(self):
         r = self.predict([("ab12", .98), ("ab12", .97)], length=4)

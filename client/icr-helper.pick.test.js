@@ -692,6 +692,104 @@ test('模型拒答（无 JSON 的「抱歉，我不能…」）时给出明确�
   assert.doesNotMatch(toasts, /不是合法 JSON/);
 });
 
+async function recognizeWithReply(reply, cfgExtra = {}) {
+  const dom = makePage(CLICK_HTML);
+  const win = dom.window;
+  const store = {
+    icrh_config_v1: Object.assign({ apiKey: 'k', localUrl: '' }, cfgExtra),
+    icrh_site_rules_v2: { 'www.rainyun.com': [{ id: 'c1', type: 'click', enabled: true, img: '#bg' }] },
+  };
+  const menus = [];
+  await install(win, store, menus);
+  const payloads = [];
+  win.GM_xmlhttpRequest = (req) => {
+    payloads.push(JSON.parse(req.data));
+    req.onload({ status: 200, responseText: JSON.stringify(reply) });
+  };
+  menus.find(m => m.name.includes('__recognize')).fn();
+  await sleep(1500);
+  const toasts = [...win.document.querySelectorAll('#icrh-toast-box div')].map(d => d.textContent).join('\n');
+  return { toasts, payloads };
+}
+
+test('推理模型把 max_tokens 用完（content 为 null、finish_reason=length）时说明原因', async () => {
+  const { toasts } = await recognizeWithReply({
+    choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'length' }],
+    usage: { completion_tokens: 500, completion_tokens_details: { reasoning_tokens: 500 } },
+  });
+  assert.match(toasts, /max_tokens/);
+  assert.match(toasts, /推理|思考/);
+  assert.doesNotMatch(toasts, /响应中无内容/);
+});
+
+test('content 是分段数组时拼出文字', async () => {
+  const { toasts } = await recognizeWithReply({
+    choices: [{ message: { content: [{ type: 'text', text: '{"points":[{"x_ratio":0.5,' }, { type: 'text', text: '"y_ratio":0.5}]}' }] } }],
+  });
+  assert.doesNotMatch(toasts, /失败/);
+});
+
+test('「额外请求体」合并进大模型请求（可关闭推理），不能覆盖 model / messages', async () => {
+  const { payloads } = await recognizeWithReply(
+    { choices: [{ message: { content: '{"points":[{"x_ratio":0.5,"y_ratio":0.5}]}' } }] },
+    { model: 'm1', extraBody: '{"reasoning_effort":"minimal","model":"evil","messages":[]}' });
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].reasoning_effort, 'minimal');
+  assert.equal(payloads[0].model, 'm1');
+  assert.equal(payloads[0].messages.length, 1);
+});
+
+test('「推理强度」设置写进请求的 reasoning_effort；不设置时不发送该字段', async () => {
+  const ok = { choices: [{ message: { content: '{"points":[{"x_ratio":0.5,"y_ratio":0.5}]}' } }] };
+  const a = await recognizeWithReply(ok, { reasoningEffort: 'none' });
+  assert.equal(a.payloads[0].reasoning_effort, 'none');
+  const b = await recognizeWithReply(ok, {});
+  assert.equal('reasoning_effort' in b.payloads[0], false);
+  // 额外请求体优先，便于用服务商自己的字段
+  const c = await recognizeWithReply(ok, { reasoningEffort: 'none', extraBody: '{"reasoning_effort":"low"}' });
+  assert.equal(c.payloads[0].reasoning_effort, 'low');
+});
+
+/* ---------------- 数字字母提示词：背景干扰字符 ---------------- */
+
+async function recognizeText(reply, cfgExtra = {}) {
+  const dom = makePage('<img id="code" src="data:image/png;base64,AAAA" data-w="120" data-h="40"><input id="answer">');
+  const win = dom.window;
+  const store = {
+    icrh_config_v1: Object.assign({ apiKey: 'k', localUrl: '', backend: 'llm' }, cfgExtra),
+    icrh_site_rules_v2: { 'www.rainyun.com': [{ id: 't1', type: 'text', enabled: true, img: '#code', input: '#answer' }] },
+  };
+  const menus = [];
+  await install(win, store, menus);
+  const payloads = [];
+  win.GM_xmlhttpRequest = (req) => {
+    payloads.push(JSON.parse(req.data));
+    req.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: reply } }] }) });
+  };
+  menus.find(m => m.name.includes('__recognize')).fn();
+  await waitFor(() => win.document.getElementById('answer').value || win.document.querySelector('#icrh-toast-box div'));
+  await sleep(50);
+  return { value: win.document.getElementById('answer').value, payloads, store };
+}
+
+test('数字字母默认提示词要求忽略背景干扰字符；模型输出中的空格被去掉', async () => {
+  const { value, payloads } = await recognizeText('q e H B');
+  const prompt = payloads[0].messages[0].content[0].text;
+  assert.match(prompt, /干扰/);
+  assert.match(prompt, /背景/);
+  assert.equal(value, 'qeHB');
+});
+
+test('旧版默认提示词已存入配置时自动换成新默认；用户自定义的提示词保持不变', async () => {
+  const OLD = '你是验证码识别器。请识别图片中的验证码字符（数字/字母/汉字/算术题结果）。' +
+    '只输出识别结果本身，不要任何解释、引号或多余字符。' +
+    '如果是算术验证码（如 3+5=?），输出计算结果数字。如果图中不是验证码，输出 UNKNOWN。';
+  const a = await recognizeText('ab12', { promptText: OLD });
+  assert.match(a.payloads[0].messages[0].content[0].text, /干扰/);
+  const b = await recognizeText('ab12', { promptText: '我的提示词' });
+  assert.equal(b.payloads[0].messages[0].content[0].text, '我的提示词');
+});
+
 /* ---------------- 弹窗关闭再打开：旧弹窗隐藏留在页面里 ---------------- */
 
 // 易盾关闭再打开会新建一套弹窗，旧的 display:none 留在 DOM 里（排在前面）

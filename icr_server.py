@@ -36,7 +36,7 @@ SAVE_DIR = os.getenv("ICR_SAVE_DIR", "").strip()
 # 两个图标的识别结果靠得这么近，说明匹配到了同一处，提交只会白白增加风控分
 MIN_POINT_DISTANCE = 30
 
-app = FastAPI(title="icr-server 本地验证码识别", version="2.0.4")
+app = FastAPI(title="icr-server 本地验证码识别", version="2.0.5")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -47,6 +47,7 @@ class OcrRequest(BaseModel):
     length: Optional[int] = Field(None, ge=1, le=32)
     case: Literal['any', 'upper', 'lower'] = 'any'
     mode: Literal['auto', 'text', 'math'] = 'auto'
+    prefer: Literal['none', 'old', 'beta'] = 'none'  # 两模型冲突时优先采用哪个（仅普通文本）
 
 
 class SolveRequest(BaseModel):
@@ -126,7 +127,7 @@ def ocr(req: OcrRequest,
     result = {"ok": False, "text": "", "msg": ""}
     try:
         result = local_recognition.recognize_text(raw, charset=req.charset, length=req.length,
-                                                  case=req.case, mode=req.mode)
+                                                  case=req.case, mode=req.mode, prefer=req.prefer)
     except Exception as exc:
         result = {"ok": False, "text": "", "reason": "engine_error", "fallback_suggested": True,
                   "msg": f"识别异常: {exc}"}

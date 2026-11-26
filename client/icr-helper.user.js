@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ICR 验证码助手
 // @namespace    https://github.com/jiemo9527/icr-server
-// @version      2.0.4
+// @version      2.0.5
 // @description  按规则识别网页验证码：数字字母、计算题、滑块、图标点选、文字点选。识别由本机 icr-server 完成，可选多模态大模型备选；只填写/点击/拖动，不自动提交。使用大模型时验证码图片会发往你配置的 API。
 // @author       jiemo9527
 // @license      MIT
@@ -45,9 +45,13 @@
         // —— LLM 可配置项 ——
         temperature: 0,
         maxTokens: 500,
+        reasoningEffort: '',     // 推理强度（reasoning_effort），空=不发送，用模型默认
         extraHeaders: '',        // 额外请求头，JSON 格式，如 {"X-Token":"xxx"}
-        promptText: '你是验证码识别器。请识别图片中的验证码字符（数字/字母/汉字/算术题结果）。' +
-            '只输出识别结果本身，不要任何解释、引号或多余字符。' +
+        extraBody: '',           // 额外请求体字段，JSON 格式，如 {"reasoning_effort":"minimal"}
+        promptText: '你是验证码识别器。图中是一个文本验证码：真正的答案是前景里字号最大、最粗最醒目、颜色最深、' +
+            '通常位于中间并排成一行的那几个字符（数字/字母/汉字，常有倾斜、扭曲或粘连）。' +
+            '背景里大量浅色、细小、零散分布的字母数字以及线条、噪点都是干扰，必须全部忽略，不要输出。' +
+            '按从左到右的顺序只输出这些主体字符，区分大小写，字符之间不加空格，不要任何解释、引号或多余字符。' +
             '如果是算术验证码（如 3+5=?），输出计算结果数字。如果图中不是验证码，输出 UNKNOWN。',
         promptSlider: '图中是一个滑块拼图验证码。背景图上有一个明显缺口（凹槽）。' +
             '请定位缺口的中心点，返回 JSON：{"x_ratio": <缺口中心横坐标占图片宽度的比例, 0~1 的小数>}。' +
@@ -57,9 +61,22 @@
             '按点击顺序排列。只输出 JSON，不要其他内容。',
     };
 
-    let cfg = Object.assign({}, DEFAULT_CFG, GM_getValue(CFG_KEY, {}) || {});
+    // 旧版默认提示词：用户没改过时保存在配置里的就是它，读取时换成新默认（自定义的不动）
+    const OLD_DEFAULT_PROMPTS = {
+        promptText: ['你是验证码识别器。请识别图片中的验证码字符（数字/字母/汉字/算术题结果）。' +
+            '只输出识别结果本身，不要任何解释、引号或多余字符。' +
+            '如果是算术验证码（如 3+5=?），输出计算结果数字。如果图中不是验证码，输出 UNKNOWN。'],
+    };
+    function loadCfg() {
+        const c = Object.assign({}, DEFAULT_CFG, GM_getValue(CFG_KEY, {}) || {});
+        for (const [key, olds] of Object.entries(OLD_DEFAULT_PROMPTS)) {
+            if (olds.includes(c[key])) c[key] = DEFAULT_CFG[key];
+        }
+        return c;
+    }
+    let cfg = loadCfg();
     const saveCfg = () => GM_setValue(CFG_KEY, cfg);
-    const refreshCfg = () => { cfg = Object.assign({}, DEFAULT_CFG, GM_getValue(CFG_KEY, {}) || {}); };
+    const refreshCfg = () => { cfg = loadCfg(); };
 
     /* ------------------------------------------------------
      * 站点规则存储
@@ -816,10 +833,23 @@
                     try {
                         const data = JSON.parse(res.responseText);
                         if (res.status >= 200 && res.status < 300) {
-                            const content = data.choices && data.choices[0] && data.choices[0].message &&
-                                data.choices[0].message.content;
-                            if (typeof content === 'string') resolve(content.trim());
-                            else reject(new Error('响应中无内容: ' + res.responseText.slice(0, 200)));
+                            const choice = (data.choices && data.choices[0]) || {};
+                            let content = choice.message && choice.message.content;
+                            // 部分接口把 content 返回成分段数组 [{type:'text', text}]
+                            if (Array.isArray(content)) {
+                                content = content.map(p => (typeof p === 'string' ? p : (p && p.text) || '')).join('');
+                            }
+                            if (typeof content === 'string' && content.trim()) resolve(content.trim());
+                            else if (choice.finish_reason === 'length') {
+                                const usage = data.usage || {};
+                                const reasoning = (usage.completion_tokens_details || {}).reasoning_tokens;
+                                const err = new Error('模型输出被 max_tokens（' + (payload.max_tokens || '默认') + '）截断，没有给出答案' +
+                                    (reasoning ? '：其中 ' + reasoning + ' 个 token 用在了推理/思考上' : '') +
+                                    '。这是推理模型的常见情况，也是响应慢的原因；可在「设置 → 高级」把「推理强度」设为 none / minimal，' +
+                                    '或调大 max_tokens，或换用 fast / 非推理模型');
+                                err.truncated = true;
+                                reject(err);
+                            } else reject(new Error('响应中无内容: ' + res.responseText.slice(0, 200)));
                         } else {
                             reject(new Error('API 返回 HTTP ' + res.status + ': ' + res.responseText.slice(0, 200)));
                         }
@@ -831,6 +861,25 @@
                 ontimeout: () => reject(new Error('API 请求超时')),
             });
         });
+    }
+
+    // 推理强度：只在用户选了值时发送，不支持该字段的服务会报错
+    const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high'];
+    function reasoningField(value = cfg.reasoningEffort) {
+        return REASONING_EFFORTS.includes(value) ? { reasoning_effort: value } : {};
+    }
+
+    // 「额外请求体」：合并进请求（如关闭推理），但 model / messages 由脚本决定
+    function parseExtraBody(text = cfg.extraBody) {
+        if (!text || !String(text).trim()) return {};
+        let extra;
+        try { extra = JSON.parse(text); } catch (e) {
+            throw new Error('「额外请求体」不是合法 JSON: ' + e.message);
+        }
+        if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('「额外请求体」必须是 JSON 对象');
+        delete extra.model;
+        delete extra.messages;
+        return extra;
     }
 
     // 模型拒答：没有 JSON，且是「抱歉 / 不能 / 无法协助」之类的话
@@ -868,11 +917,13 @@
             }],
             temperature: Number(cfg.temperature) || 0,
             max_tokens: Number(cfg.maxTokens) || 500,
+            ...reasoningField(),
+            ...parseExtraBody(),
         };
         const reply = await llmChat(payload);
         log('LLM 原始返回:', reply);
         if (type === 'text') {
-            const clean = reply.replace(/```[a-z]*|```/g, '').trim();
+            const clean = reply.replace(/```[a-z]*|```/g, '').replace(/\s+/g, '');
             if (!clean || /UNKNOWN/i.test(clean)) throw new Error('模型未能识别该图片');
             return { text: clean };
         }
@@ -940,9 +991,12 @@
         const body = { image: dataUrl, charset: rule.charset || 'alnum',
             case: rule.case || 'any', mode: cand.type === 'math' ? 'math' : (rule.mode || 'auto') };
         if (Number.isInteger(rule.length) && rule.length > 0) body.length = rule.length;
+        if (cand.type !== 'math' && ['old', 'beta'].includes(rule.prefer)) body.prefer = rule.prefer;
         const r = await localApi(cand.type === 'math' ? '/math' : '/ocr', body);
         if (!r.ok) throw new Error('未识别（' + (r.msg || '无结果') + '）');
         cand.localKind = r.kind === 'math' || cand.type === 'math' ? 'math' : 'text';
+        cand.localNote = r.reason === 'preferred_model' ? '（两模型不一致，按规则采用' +
+            (r.preferred === 'old' ? '旧模型' : '新模型') + '结果，请核对）' : '';
         return r.text;
     }
 
@@ -1859,7 +1913,8 @@
                 if (!cand.input) throw new Error('未识别到元素：验证码输入框不在页面（可在「规则管理」检查）');
                 fillInput(cand.input, answer.text);
                 processed.set(cand.key, 'ok');
-                toast(engineName(via === 'local' ? (cand.localKind || cand.type) : cand.type, via) + ' 识别完成：已填入 ' + answer.text, 'ok');
+                toast(engineName(via === 'local' ? (cand.localKind || cand.type) : cand.type, via) + ' 识别完成：已填入 ' + answer.text +
+                    (via === 'local' && cand.localNote ? cand.localNote : ''), 'ok');
             } else if (cand.type === 'slider') {
                 const xr = Number(answer.x_ratio);
                 if (!(xr > 0 && xr < 1)) throw new Error('缺口坐标异常：' + JSON.stringify(answer).slice(0, 80));
@@ -2312,8 +2367,13 @@
             '   <div class="icrh-card"><h3>模型参数</h3>',
             '    <div class="icrh-grid"><div><label class="icrh-f">temperature</label><input type="text" id="icrh-temp"></div>',
             '     <div><label class="icrh-f">max_tokens</label><input type="text" id="icrh-maxtok"></div></div>',
+            '    <label class="icrh-f">推理强度 reasoning_effort <span class="icrh-normal">（推理模型慢或返回空时选 none / minimal；非推理模型或不支持该字段的服务请保持「不发送」）</span></label>',
+            '    <select id="icrh-effort"><option value="">不发送（模型默认）</option><option value="none">none（不推理，最快）</option>' +
+                '<option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>',
             '    <label class="icrh-f">额外请求头 <span class="icrh-normal">（JSON，可覆盖 Authorization）</span></label>',
             '    <input type="text" id="icrh-headers" placeholder=\'{"X-Token":"..."}\'>',
+            '    <label class="icrh-f">额外请求体 <span class="icrh-normal">（JSON，合并进请求，可覆盖上面的参数；用于服务商自己的字段）</span></label>',
+            '    <input type="text" id="icrh-body" placeholder=\'{"thinking":{"type":"disabled"}}\'>',
             '   </div>',
             '   <div class="icrh-card"><h3>提示词</h3>',
             '    <label class="icrh-f">文本 / 计算题</label><textarea id="icrh-prompt-text" rows="3"></textarea>',
@@ -2348,8 +2408,10 @@
         $('#icrh-key').value = cfg.apiKey;
         $('#icrh-model').value = cfg.model;
         $('#icrh-headers').value = cfg.extraHeaders || '';
+        $('#icrh-body').value = cfg.extraBody || '';
         $('#icrh-temp').value = cfg.temperature;
         $('#icrh-maxtok').value = cfg.maxTokens;
+        $('#icrh-effort').value = REASONING_EFFORTS.includes(cfg.reasoningEffort) ? cfg.reasoningEffort : '';
         $('#icrh-prompt-text').value = cfg.promptText;
         $('#icrh-prompt-slider').value = cfg.promptSlider;
         $('#icrh-prompt-click').value = cfg.promptClick;
@@ -2389,13 +2451,15 @@
         $('.icrh-open-rules').addEventListener('click', () => { closeSettings(); openRuleManager(); });
 
         $('.icrh-reset').addEventListener('click', () => {
-            for (const key of ['temperature', 'maxTokens', 'extraHeaders', 'promptText', 'promptSlider', 'promptClick',
+            for (const key of ['temperature', 'maxTokens', 'reasoningEffort', 'extraHeaders', 'extraBody', 'promptText', 'promptSlider', 'promptClick',
                 'clickDelayMin', 'clickDelayMax']) {
                 cfg[key] = DEFAULT_CFG[key];
             }
+            $('#icrh-effort').value = cfg.reasoningEffort;
             $('#icrh-delay-min').value = cfg.clickDelayMin;
             $('#icrh-delay-max').value = cfg.clickDelayMax;
             $('#icrh-headers').value = cfg.extraHeaders;
+            $('#icrh-body').value = cfg.extraBody;
             $('#icrh-temp').value = cfg.temperature;
             $('#icrh-maxtok').value = cfg.maxTokens;
             $('#icrh-prompt-text').value = cfg.promptText;
@@ -2413,6 +2477,12 @@
                     return;
                 }
             }
+            const extraBody = $('#icrh-body').value.trim();
+            try { parseExtraBody(extraBody); } catch (e) {
+                showTab('advanced');
+                toast(e.message + '，未保存', 'err');
+                return;
+            }
             const dMin = $('#icrh-delay-min').value.trim();
             const dMax = $('#icrh-delay-max').value.trim();
             if ([dMin, dMax].some(v => v !== '' && !(Number(v) >= 0 && Number(v) <= 10000))) {
@@ -2424,6 +2494,8 @@
             cfg.apiKey = $('#icrh-key').value.trim();
             cfg.model = $('#icrh-model').value.trim() || DEFAULT_CFG.model;
             cfg.extraHeaders = extraHeaders;
+            cfg.extraBody = extraBody;
+            cfg.reasoningEffort = REASONING_EFFORTS.includes($('#icrh-effort').value) ? $('#icrh-effort').value : '';
             cfg.temperature = parseFloat($('#icrh-temp').value);
             if (isNaN(cfg.temperature)) cfg.temperature = 0;
             cfg.maxTokens = parseInt($('#icrh-maxtok').value, 10);
@@ -2484,7 +2556,10 @@
                 const res = await llmChat({
                     model: cfg.model,
                     messages: [{ role: 'user', content: '请回复"ok"' }],
-                    max_tokens: 5,
+                    // 推理模型会先消耗 token 思考，按设置的上限测试，避免 5 个 token 必然截断
+                    max_tokens: parseInt($('#icrh-maxtok').value, 10) || DEFAULT_CFG.maxTokens,
+                    ...reasoningField($('#icrh-effort').value),
+                    ...parseExtraBody($('#icrh-body').value),
                 });
                 toast('大模型连接成功，返回：' + res, 'ok');
             } catch (e) {
@@ -3043,6 +3118,7 @@
         if (rule.length) parts.push('长度: ' + rule.length);
         if (rule.charset) parts.push('字符集: ' + rule.charset);
         if (rule.case) parts.push('大小写: ' + rule.case);
+        if (rule.prefer) parts.push('冲突时优先: ' + (rule.prefer === 'old' ? '旧模型' : '新模型'));
         return parts.join('  |  ');
     }
 
@@ -3174,9 +3250,10 @@
                 row.appendChild(edit);
                 const options = el('button', 'options', '本地选项');
                 options.addEventListener('click', () => {
-                    const keys = ['charset', 'length', 'case', 'mode', 'pieceStartRatio'];
+                    const keys = ['charset', 'length', 'case', 'mode', 'prefer', 'pieceStartRatio'];
                     const initial = Object.fromEntries(keys.filter(k => rule[k] !== undefined).map(k => [k, rule[k]]));
-                    const raw = prompt('本地选项 JSON：charset=digits/letters/alnum；length=1~32；case=any/upper/lower；mode=auto/text。滑块可设 pieceStartRatio=0~1（选择器请点「编辑」修改）。留 {} 清空。', JSON.stringify(initial));
+                    const raw = prompt('本地选项 JSON：charset=digits/letters/alnum；length=1~32；case=any/upper/lower；mode=auto/text；' +
+                        'prefer=old/beta（两模型结果冲突时采用旧模型/新模型的结果，仍要求高分，可能填错）。滑块可设 pieceStartRatio=0~1（选择器请点「编辑」修改）。留 {} 清空。', JSON.stringify(initial));
                     if (raw === null) return;
                     try {
                         const v = JSON.parse(raw);
@@ -3184,6 +3261,7 @@
                         if (v.charset && !['digits','letters','alnum'].includes(v.charset)) throw new Error('字符集无效');
                         if (v.case && !['any','upper','lower'].includes(v.case)) throw new Error('大小写无效');
                         if (v.mode && !['auto','text'].includes(v.mode)) throw new Error('模式无效');
+                        if (v.prefer !== undefined && !['old','beta'].includes(v.prefer)) throw new Error('prefer 只能是 old 或 beta');
                         if (v.length !== undefined && (!Number.isInteger(v.length) || v.length < 1 || v.length > 32)) throw new Error('长度无效');
                         if (v.pieceStartRatio !== undefined && (!Number.isFinite(v.pieceStartRatio) || v.pieceStartRatio<0 || v.pieceStartRatio>1)) throw new Error('起始比例无效');
                         const all = loadAllRules();

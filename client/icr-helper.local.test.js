@@ -81,6 +81,20 @@ test('数字字母：本地 OCR 识别出结果就直接填入，不调用大模
   assert.ok(t.toasts().some(s => /本地 OCR 识别完成：已填入 ab12/.test(s)), t.toasts().join('|'));
 });
 
+test('数字字母规则设了冲突时优先的模型：请求 /ocr 带 prefer，没设置时不带', async () => {
+  const t = await setup({
+    html: TEXT_HTML, rules: [{ ...TEXT_RULE[0], prefer: 'beta' }], cfg: { backend: 'local' },
+    net: { '/ocr': () => ({ ok: true, text: 'qeHB', reason: 'preferred_model', preferred: 'beta' }) },
+  });
+  await t.run();
+  assert.equal(t.localCalls('/ocr')[0].body.prefer, 'beta');
+  assert.equal(t.doc.getElementById('vc').value, 'qeHB');
+  assert.ok(t.toasts().some(s => /两模型不一致/.test(s)), t.toasts().join('|'));
+  const plain = await setup({ html: TEXT_HTML, rules: TEXT_RULE, net: { '/ocr': () => ({ ok: true, text: 'ab12' }) } });
+  await plain.run();
+  assert.equal('prefer' in plain.localCalls('/ocr')[0].body, false);
+});
+
 test('uni-app 图片：规则选中的 img 是透明的（显示靠同层背景 div），识别时不能误判为「已换图或关闭」', async () => {
   const t = await setup({
     html: '<uni-image class="yzm" data-w="82" data-h="38"><div style="background-image:url(data:image/png;base64,QUFBQQ==)" data-w="82" data-h="38"></div>' +
