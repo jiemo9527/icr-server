@@ -11,7 +11,7 @@
 
 | 类型 | 本地接口 | 说明 |
 |---|---|---|
-| 数字字母 | `/ocr` | 两个 ddddocr 模型交叉校验，可限定字符集、长度、大小写 |
+| 数字字母 | `/ocr` | 两个 ddddocr 模型交叉校验，可限定字符集、长度、大小写；冲突时可按规则优先采用其中一个 |
 | 计算题 | `/math` | OCR 后安全解析四则运算，必要时用 RapidOCR 复核 |
 | 滑块 | `/slider` | 拼图块模板 / 形状匹配，支持 CSS 雪碧图；客户端拖动时按拼图块实际位置闭环修正 |
 | 图标点选 | `/solve` | 按题目图标顺序在大图中定位 |
@@ -69,8 +69,22 @@ docker build -t icr-server:local .
 - **识别后端**：本地优先、仅本地、仅大模型。优先级为规则 > 验证码类型 > 全局。选「仅本地」时，图片绝不会发给大模型。
 - **自动执行**：默认关闭。开启后，验证码出现或换图时自动识别；同一目标最多连续自动执行 2 次，防止"失败 → 换图 → 再执行"的循环。
 - **本地点选方式**（点选规则才有）：自动判断、图标点选、文字点选、关闭（直接用大模型）。
+- **本地选项**（「规则管理 → 本地选项」，JSON）：数字字母可设 `charset`、`length`、`case`、`mode`，以及 `prefer`（`old` / `beta`）——两个本地模型结果不一致时，采用指定模型的结果。被采用的结果仍要高分、并满足字符集/长度/大小写，填入后会提示「请核对」。
+
+数字字母验证码两个本地模型结果不一致、又不会改用大模型时（仅本地，或没有可用的大模型），输入框旁会弹出候选框，列出两个结果，点哪个填哪个；按 Esc 或 × 关闭。和其他情况一样，只填写，不提交。
 
 同一个验证码有多条规则都适用、脚本判断不了该用哪条时，不会自动执行，而是按「规则N」列出按钮，让你选一个。
+
+### 大模型设置
+
+在「设置 → 识别引擎」填写 OpenAI 兼容接口的地址、API Key 和模型名（新安装默认 `grok-4.7-build-fast`；已保存过的设置不会被改）。「设置 → 高级」里还有：
+
+- **max_tokens**：新安装默认 2500。推理（思考）模型会先把 token 花在思考上，设得太小会返回空内容；脚本会提示是被截断了。
+- **推理强度**（`reasoning_effort`）：默认不发送。推理模型很慢或返回空内容时，选 `none` / `minimal`；不支持该字段的服务保持「不发送」。
+- **额外请求体**：JSON，合并进请求，可覆盖上面的参数，用来填服务商自己的字段（如 `{"thinking":{"type":"disabled"}}`）；`model` 和 `messages` 不能覆盖。
+- **提示词**：数字字母的默认提示词要求只读前景主体字符、忽略背景里浅色细小的干扰字符。升级后，没改过提示词的会自动用上新版；自己改过的保持不变。
+
+部分服务商（例如 OpenAI）会拒绝识别验证码图片，这时请换用其他模型或改用本地识别。
 
 ### 规则示例
 
@@ -99,7 +113,7 @@ docker build -t icr-server:local .
 | 接口 | 主要参数 | 返回 |
 |---|---|---|
 | `GET /health` | — | `endpoints`、`auth_required`、`auth_ok` |
-| `POST /ocr` | `image`、`charset`（digits/letters/alnum）、`length`、`case`、`mode` | `ok`、`text` |
+| `POST /ocr` | `image`、`charset`（digits/letters/alnum）、`length`、`case`、`mode`、`prefer`（none/old/beta，两模型冲突时采用哪个，默认 none） | `ok`、`text`、`reason`、`candidates`（各模型结果）；按 `prefer` 采用时 `reason` 为 `preferred_model` |
 | `POST /math` | `image` | `ok`、`text`（计算结果） |
 | `POST /slider` | `bg`、`piece`，可选 `piece_crop=[x,y,w,h]`、`piece_scale` | `gap_left`、`width`、`piece_offset_left`、`piece_width` |
 | `POST /solve` | `bg`、`sprite`（题目图标条） | `points`（原图坐标，按点击顺序）、`width`、`height` |

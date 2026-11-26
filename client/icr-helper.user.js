@@ -29,7 +29,7 @@
     const DEFAULT_CFG = {
         apiUrl: 'https://api.openai.com/v1/chat/completions',
         apiKey: '',
-        model: 'gpt-4o-mini',
+        model: 'grok-4.7-build-fast',
         debug: false,
         // —— 本地识别服务（icr_server.py）——
         // 数字字母验证码走 /ocr，腾讯「依次点击图标」走 /solve；留空则全部交给大模型
@@ -44,7 +44,7 @@
         clickDelayMax: 1500,
         // —— LLM 可配置项 ——
         temperature: 0,
-        maxTokens: 500,
+        maxTokens: 2500,
         reasoningEffort: '',     // 推理强度（reasoning_effort），空=不发送，用模型默认
         extraHeaders: '',        // 额外请求头，JSON 格式，如 {"X-Token":"xxx"}
         extraBody: '',           // 额外请求体字段，JSON 格式，如 {"reasoning_effort":"minimal"}
@@ -916,7 +916,7 @@
                 content,
             }],
             temperature: Number(cfg.temperature) || 0,
-            max_tokens: Number(cfg.maxTokens) || 500,
+            max_tokens: Number(cfg.maxTokens) || DEFAULT_CFG.maxTokens,
             ...reasoningField(),
             ...parseExtraBody(),
         };
@@ -993,7 +993,13 @@
         if (Number.isInteger(rule.length) && rule.length > 0) body.length = rule.length;
         if (cand.type !== 'math' && ['old', 'beta'].includes(rule.prefer)) body.prefer = rule.prefer;
         const r = await localApi(cand.type === 'math' ? '/math' : '/ocr', body);
-        if (!r.ok) throw new Error('未识别（' + (r.msg || '无结果') + '）');
+        if (!r.ok) {
+            const err = new Error('未识别（' + (r.msg || '无结果') + '）');
+            if (r.reason === 'model_conflict' && cand.type !== 'math' && Array.isArray(r.candidates)) {
+                err.choices = [...new Set(r.candidates.map(c => c && String(c.text || '')).filter(Boolean))];
+            }
+            throw err;
+        }
         cand.localKind = r.kind === 'math' || cand.type === 'math' ? 'math' : 'text';
         cand.localNote = r.reason === 'preferred_model' ? '（两模型不一致，按规则采用' +
             (r.preferred === 'old' ? '旧模型' : '新模型') + '结果，请核对）' : '';
@@ -1251,6 +1257,59 @@
     /* ======================================================
      * 填写输入框（兼容 React / Vue 受控组件）
      * ====================================================== */
+    // 本地 OCR 两模型结果冲突时的候选悬浮框：贴在输入框旁，用户点哪个填哪个；不自动提交
+    function showChoices(cand, choices) {
+        const old = document.getElementById('icrh-choice');
+        if (old) old.remove();
+        const input = cand.input;
+        const box = document.createElement('div');
+        box.id = 'icrh-choice';
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-label', '选择验证码识别结果');
+        box.style.cssText = 'position:fixed;z-index:2147483647;display:flex;align-items:center;gap:6px;padding:6px 8px;' +
+            'background:#fff;border:1px solid #b39ddb;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);' +
+            'font:13px system-ui,-apple-system,sans-serif;color:#333;';
+        const tip = document.createElement('span');
+        tip.textContent = '本地两模型不一致，选一个填入：';
+        box.appendChild(tip);
+        const close = () => { box.remove(); document.removeEventListener('keydown', onKey, true); };
+        const onKey = (e) => { if (e.key === 'Escape') close(); };
+        for (const text of choices) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.dataset.choice = text;
+            b.textContent = text;
+            b.style.cssText = 'padding:4px 12px;border:1px solid #7e57c2;border-radius:6px;background:#ede7f6;color:#4527a0;' +
+                'font:600 15px ui-monospace,Consolas,monospace;cursor:pointer;';
+            b.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                fillInput(input, text);
+                close();
+                toast('已填入 ' + text + '（手动选择，请核对后自行提交）', 'ok');
+            });
+            box.appendChild(b);
+        }
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.textContent = '×';
+        x.title = '关闭（Esc）';
+        x.style.cssText = 'border:0;background:none;font-size:18px;line-height:1;color:#999;cursor:pointer;padding:0 2px;';
+        x.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); close(); });
+        box.appendChild(x);
+        document.documentElement.appendChild(box);
+        document.addEventListener('keydown', onKey, true);
+        // 优先放在输入框下方，放不下放上方；水平方向不超出视口
+        const r = input.getBoundingClientRect();
+        const bw = box.offsetWidth || 260, bh = box.offsetHeight || 40;
+        const vw = window.innerWidth || document.documentElement.clientWidth || 1024;
+        const vh = window.innerHeight || document.documentElement.clientHeight || 768;
+        let top = r.bottom + 6;
+        if (top + bh > vh - 4) top = Math.max(4, r.top - bh - 6);
+        box.style.top = top + 'px';
+        box.style.left = Math.max(4, Math.min(r.left, vw - bw - 4)) + 'px';
+        return box;
+    }
+
     function fillInput(input, value) {
         input.focus();
         const proto = Object.getPrototypeOf(input);
@@ -1885,6 +1944,12 @@
                     via = 'local';
                 } catch (e) {
                     assertCurrent();
+                    // 两模型冲突且不会改用大模型：弹出候选让用户自己选，选中才填入（不自动提交）
+                    const noLlm = mode === 'local' || !(cfg.llmFallback && cfg.apiKey);
+                    if (isText && noLlm && e.choices && e.choices.length > 1 && cand.input) {
+                        showChoices(cand, e.choices);
+                        e.message += '；已弹出候选，请选择正确的一个';
+                    }
                     // 兼容旧版 localUrl 留空表示全部用大模型；仅本地不享受此例外。
                     if (mode === 'local' || localBase()) fallbackOrThrow(e, null, mode);
                 }
@@ -2499,7 +2564,7 @@
             cfg.temperature = parseFloat($('#icrh-temp').value);
             if (isNaN(cfg.temperature)) cfg.temperature = 0;
             cfg.maxTokens = parseInt($('#icrh-maxtok').value, 10);
-            if (isNaN(cfg.maxTokens) || cfg.maxTokens < 1) cfg.maxTokens = 500;
+            if (isNaN(cfg.maxTokens) || cfg.maxTokens < 1) cfg.maxTokens = DEFAULT_CFG.maxTokens;
             cfg.promptText = $('#icrh-prompt-text').value.trim() || DEFAULT_CFG.promptText;
             cfg.promptSlider = $('#icrh-prompt-slider').value.trim() || DEFAULT_CFG.promptSlider;
             cfg.promptClick = $('#icrh-prompt-click').value.trim() || DEFAULT_CFG.promptClick;
@@ -2686,7 +2751,7 @@
             { kind: 'hint', label: '题目提示（如「请依次点击」后面的字/图）', optional: true },
         ],
     };
-    const OWN_UI_IDS = ['icrh-pick-panel', 'icrh-pick-hl', 'icrh-toast-box', 'icrh-fab', 'icrh-settings-host', 'icrh-rules-host'];
+    const OWN_UI_IDS = ['icrh-pick-panel', 'icrh-pick-hl', 'icrh-toast-box', 'icrh-fab', 'icrh-settings-host', 'icrh-rules-host', 'icrh-choice'];
     let picker = null;        // 当前框架内的拾取状态
     let pickToken = '';       // 顶层：当前拾取会话令牌，只接受带同一令牌的子框架回报
 

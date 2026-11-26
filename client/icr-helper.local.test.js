@@ -95,6 +95,41 @@ test('数字字母规则设了冲突时优先的模型：请求 /ocr 带 prefer�
   assert.equal('prefer' in plain.localCalls('/ocr')[0].body, false);
 });
 
+test('本地 OCR 两模型冲突：仅本地时弹出候选悬浮框，用户点选后才填入，不自动提交', async () => {
+  const t = await setup({
+    html: TEXT_HTML + '<button id="ok" onclick="window.__submitted=1">确定</button>', rules: TEXT_RULE, cfg: { backend: 'local' },
+    net: { '/ocr': () => ({ ok: false, text: 'dbqf', reason: 'model_conflict', msg: '模型结果冲突（dbqf / db0f）',
+      candidates: [{ text: 'dbqf', score: 0.95 }, { text: 'db0f', score: 0.93 }, { text: 'dbqf', score: 0.9 }, { text: '', score: 0 }] }) },
+  });
+  await t.run();
+  assert.equal(t.doc.getElementById('vc').value, '', '冲突时不能自动填');
+  const box = t.doc.getElementById('icrh-choice');
+  assert.ok(box, '应弹出候选框');
+  const btns = [...box.querySelectorAll('button[data-choice]')];
+  assert.deepEqual(btns.map(b => b.dataset.choice), ['dbqf', 'db0f']);
+  assert.equal(t.llmCalls().length, 0, '仅本地不能请求大模型');
+  btns[1].click();
+  assert.equal(t.doc.getElementById('vc').value, 'db0f');
+  assert.equal(t.doc.getElementById('icrh-choice'), null, '选完关闭');
+  assert.equal(t.win.__submitted, undefined);
+});
+
+test('本地优先且可用大模型时，冲突照常改用大模型，不弹候选框', async () => {
+  const t = await setup({
+    html: TEXT_HTML, rules: TEXT_RULE,
+    net: { '/ocr': () => ({ ok: false, reason: 'model_conflict', msg: '冲突', candidates: [{ text: 'ab12', score: .99 }, { text: 'abl2', score: .99 }] }),
+      llm: () => 'ab12' },
+  });
+  await t.run();
+  assert.equal(t.doc.getElementById('vc').value, 'ab12');
+  assert.equal(t.doc.getElementById('icrh-choice'), null);
+});
+
+test('默认配置：max_tokens 2500，模型 grok-4.7-build-fast', () => {
+  assert.match(source, /maxTokens:\s*2500,/);
+  assert.match(source, /model:\s*'grok-4\.7-build-fast',/);
+});
+
 test('uni-app 图片：规则选中的 img 是透明的（显示靠同层背景 div），识别时不能误判为「已换图或关闭」', async () => {
   const t = await setup({
     html: '<uni-image class="yzm" data-w="82" data-h="38"><div style="background-image:url(data:image/png;base64,QUFBQQ==)" data-w="82" data-h="38"></div>' +
